@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::PathBuf,
     process::{self, Command, Stdio},
     sync::mpsc,
@@ -21,6 +22,28 @@ struct KillOnDrop(process::Child);
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         let _ignored = self.0.kill();
+    }
+}
+
+/// Returns the Windows PIDs of all running RobloxStudioBeta.exe processes.
+/// Uses tasklist.exe so the PIDs are in Windows PID space — valid for taskkill.
+fn studio_pids() -> HashSet<String> {
+    let output = Command::new("tasklist.exe")
+        .args(&["/FI", "IMAGENAME eq RobloxStudioBeta.exe", "/FO", "CSV", "/NH"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                // CSV: "RobloxStudioBeta.exe","27460","Console","1","530,308 K"
+                let fields: Vec<&str> = line.split(',').collect();
+                fields.get(1).map(|pid| pid.trim_matches('"').to_owned())
+            })
+            .collect(),
+        Err(_) => HashSet::new(),
     }
 }
 
@@ -53,6 +76,9 @@ impl PlaceRunner {
             port: self.port,
             server_id: self.server_id.to_owned(),
         });
+
+        // Snapshot existing Studio PIDs so cleanup only kills the instance we spawn.
+        let pids_before = studio_pids();
 
         let _studio_process = KillOnDrop(
             Command::new(studio_install.application_path())
@@ -90,6 +116,18 @@ impl PlaceRunner {
 
         message_receiver.stop();
         fs::remove_file(&plugin_file_path)?;
+
+        // Kill only the Studio instance(s) we spawned. tasklist/taskkill both use
+        // Windows PIDs, avoiding the WSL2 Linux-PID mismatch from child.id().
+        // /T also catches the RobloxCrashHandler child each instance spawns.
+        let pids_after = studio_pids();
+        for pid in pids_after.difference(&pids_before) {
+            let _ = Command::new("taskkill.exe")
+                .args(&["/F", "/T", "/PID", pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output();
+        }
 
         Ok(())
     }

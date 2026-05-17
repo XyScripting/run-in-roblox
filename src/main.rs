@@ -71,7 +71,7 @@ fn run(options: Options) -> Result<i32, anyhow::Error> {
 
     let (sender, receiver) = mpsc::channel();
 
-    thread::spawn(move || {
+    let runner_thread = thread::spawn(move || {
         place_runner.run(sender).unwrap();
     });
 
@@ -95,6 +95,10 @@ fn run(options: Options) -> Result<i32, anyhow::Error> {
             }
         }
     }
+
+    // Wait for the runner thread to finish so KillOnDrop fires and Studio is closed
+    // before process::exit is called, otherwise Studio is orphaned.
+    let _ = runner_thread.join();
 
     Ok(exit_code)
 }
